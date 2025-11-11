@@ -1,303 +1,252 @@
 import streamlit as st
-import speech_recognition as sr
-import pyaudio
-import wave
-import os
 import requests
 import tempfile
-import json
-
-def record_audio_pyaudio(filename="recorded.wav", record_seconds=5, rate=44100, chunk=1024):
-    try:
-        st.info(f"Recording for {record_seconds} seconds using PyAudio...")
-        audio_format = pyaudio.paInt16
-        channels = 1
-        p = pyaudio.PyAudio()
-        stream = p.open(format=audio_format,
-                        channels=channels,
-                        rate=rate,
-                        input=True,
-                        frames_per_buffer=chunk)
-        frames = []
-
-        for i in range(0, int(rate / chunk * record_seconds)):
-            data = stream.read(chunk)
-            frames.append(data)
-
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-        with wave.open(filename, 'wb') as wf:
-            wf.setnchannels(channels)
-            wf.setsampwidth(p.get_sample_size(audio_format))
-            wf.setframerate(rate)
-            wf.writeframes(b''.join(frames))
-
-        st.success(f"Recording saved as {filename}")
-        return filename
-    except Exception as e:
-        st.error(f"Error recording audio: {e}")
-        return None
+import os
+from datetime import datetime
 
 def transcribe_with_deepgram(audio_file_path, api_key, language="en-US"):
+    if not api_key:
+        return "❌ Deepgram API key not configured"
+    
     try:
         url = "https://api.deepgram.com/v1/listen"
-
-        headers = {
-            "Authorization": f"Token {api_key}",
-            "Content-Type": "audio/wav"
-        }
-
-        params = {
-            "model": "nova-2",
-            "language": language,
-            "smart_format": "true",
-            "punctuate": "true",
-            "diarize": "false"
-        }
+        headers = {"Authorization": f"Token {api_key}"}
+        params = {"language": language, "punctuate": "true"}
 
         with open(audio_file_path, 'rb') as audio_file:
-            audio_data = audio_file.read()
-
-        response = requests.post(
-            url, 
-            headers=headers, 
-            params=params, 
-            data=audio_data, 
-            timeout=30
-        )
+            response = requests.post(url, headers=headers, params=params, data=audio_file, timeout=30)
         
         if response.status_code == 200:
             result = response.json()
-            # Extract transcript from response
             transcript = result['results']['channels'][0]['alternatives'][0]['transcript']
-            return transcript.strip()
+            return transcript.strip() if transcript else "No speech detected"
         else:
-            error_msg = f"Deepgram API Error {response.status_code}"
-            try:
-                error_detail = response.json()
-                error_msg += f": {error_detail.get('err_code', 'Unknown error')}"
-            except:
-                error_msg += f": {response.text}"
-            return error_msg
+            return f"❌ Deepgram Error: {response.status_code}"
             
     except Exception as e:
-        return f"Deepgram transcription error: {str(e)}"
+        return f"❌ Transcription error: {str(e)}"
 
-def transcribe_audio_data_deepgram(audio_data, api_key, language="en-US"):
+def transcribe_with_google_cloud(audio_file_path, api_key, language="en-US"):
+    if not api_key:
+        return "❌ Google Cloud API key not configured"
+    
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
-            temp_audio.write(audio_data.get_wav_data())
-            temp_audio_path = temp_audio.name
-        
-        result = transcribe_with_deepgram(temp_audio_path, api_key, language)
-        os.unlink(temp_audio_path)
-        
-        return result
-        
-    except Exception as e:
-        return f"Deepgram transcription error: {str(e)}"
+        import base64
+        with open(audio_file_path, 'rb') as audio_file:
+            audio_content = audio_file.read()
 
-def transcribe_with_google(audio_file, language="en-US"):
-    r = sr.Recognizer()
-    try:
-        with sr.AudioFile(audio_file) as source:
-            audio = r.record(source)
-            text = r.recognize_google(audio, language=language)
-            return text
-    except sr.UnknownValueError:
-        return "Google could not understand audio."
-    except sr.RequestError as e:
-        return f"Google service error: {e}"
+        audio_b64 = base64.b64encode(audio_content).decode('utf-8')
+        url = "https://speech.googleapis.com/v1/speech:recognize"
+        headers = {"Content-Type": "application/json", "X-Goog-Api-Key": api_key}
+        data = {
+            "config": {
+                "encoding": "LINEAR16",
+                "sampleRateHertz": 44100,
+                "languageCode": language,
+                "enableAutomaticPunctuation": True
+            },
+            "audio": {"content": audio_b64}
+        }
+        
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if 'results' in result and result['results']:
+                transcript = result['results'][0]['alternatives'][0]['transcript']
+                return transcript.strip()
+            return "No speech detected"
+        return f"❌ Google Cloud Error: {response.status_code}"
+            
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"❌ Transcription error: {str(e)}"
 
 def main():
+    st.set_page_config(page_title="Speech Recognition", page_icon="🎙️", layout="wide")
     st.title("🎙️ Speech Recognition App")
     
-    st.sidebar.header("🔑 API Configuration")
-    
-    api_key = st.sidebar.text_input(
-        "Deepgram API Key (optional):", 
-        type="password",
-        placeholder="Enter key starting with dg_...",
-        help="Get free API key from https://deepgram.com/"
-    )
-    
-    if api_key:
-        if api_key.startswith("dg_"):
-            st.sidebar.success("✅ Deepgram API key entered")
-        else:
-            st.sidebar.warning("⚠️ Deepgram keys usually start with 'dg_'")
-    else:
-        st.sidebar.info("ℹ️ Using Google Speech Recognition (free)")
-    
-    if api_key and st.sidebar.button("Test Deepgram Connection"):
-        with st.sidebar:
-            with st.spinner("Testing connection..."):
-                # Create a minimal silent WAV file for testing
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
-                    with wave.open(temp_file.name, 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(16000)
-                        wf.writeframes(b'\x00' * 32000) 
-                    
-                    result = transcribe_with_deepgram(temp_file.name, api_key)
-                    os.unlink(temp_file.name)
-                    
-                    if "API Error" in result:
-                        st.error(f"❌ Connection failed: {result}")
-                    elif "transcription error" in result:
-                        st.error(f"❌ Error: {result}")
-                    else:
-                        st.success("✅ Deepgram connection successful!")
-
-  
-    st.header("🎤 Speech Recognition")
-    
-    if api_key:
-        api_choice = st.radio(
-            "Choose recognition method:",
-            ["Google Speech Recognition", "Deepgram", "Record First (PyAudio)"],
-            horizontal=True
-        )
-    else:
-        api_choice = st.radio(
-            "Choose recognition method:",
-            ["Google Speech Recognition", "Record First (PyAudio)"],
-            horizontal=True
-        )
-        st.info("💡 Get a free Deepgram API key from https://deepgram.com/ for better accuracy")
-    
-    language = st.selectbox(
-        "Select language:", 
-        ["en-US", "fr-FR", "es-ES", "de-DE", "ar-SA", "hi-IN", "ja-JP", "ko-KR", "zh-CN"]
-    )
-    
-    record_seconds = st.slider("Recording duration (seconds)", 3, 15, 5)
-
     if "transcription" not in st.session_state:
         st.session_state.transcription = ""
-
-    if st.button("🎤 Start Recording", type="primary", use_container_width=True):
-        r = sr.Recognizer()
-        text = ""
-        
-        try:
-            if api_choice == "Record First (PyAudio)":
-                audio_file = record_audio_pyaudio(record_seconds=record_seconds)
-                if audio_file:
-                    if api_key:
-                        trans_method = st.radio(
-                            "Transcribe with:",
-                            ["Google", "Deepgram"],
-                            horizontal=True,
-                            key="post_record"
-                        )
-                        if trans_method == "Google":
-                            text = transcribe_with_google(audio_file, language)
-                        else:
-                            text = transcribe_with_deepgram(audio_file, api_key, language)
-                    else:
-                        text = transcribe_with_google(audio_file, language)
-                    
-                   
-                    if os.path.exists(audio_file):
-                        os.remove(audio_file)
-                        
-            else: 
-                with sr.Microphone() as source:
-                    st.info("🎤 Speak now...")
-                    r.adjust_for_ambient_noise(source, duration=0.5)
-                    audio_text = r.listen(source, timeout=10, phrase_time_limit=record_seconds)
-                    st.info("📝 Transcribing...")
-                    
-                    if api_choice == "Google Speech Recognition":
-                        try:
-                            text = r.recognize_google(audio_text, language=language)
-                        except sr.UnknownValueError:
-                            text = "Google could not understand audio."
-                        except sr.RequestError as e:
-                            text = f"Google service error: {e}"
-                    else:
-                        text = transcribe_audio_data_deepgram(audio_text, api_key, language)
-                        
-        except sr.WaitTimeoutError:
-            text = "⏰ No speech detected within the timeout period."
-        except Exception as e:
-            text = f"❌ Error: {str(e)}"
-        
     
-        if text and not any(error_msg in text for error_msg in [
-            "Error", "could not understand", "service error", "API Error", "transcription error"
-        ]):
-            st.session_state.transcription += " " + text.strip()
-            st.success("✅ Transcription added!")
-            st.balloons()
-        elif text:
-            st.warning(text)
 
-    st.header("📝 Transcription")
+    st.sidebar.header("🔑 Configuration API")
+    
+    deepgram_key = st.sidebar.text_input(
+        "Deepgram API Key",
+        type="password",
+        placeholder="Entrez votre clé Deepgram (dg_...)",
+        help="Obtenez une clé sur https://deepgram.com/"
+    )
+    
+    google_key = st.sidebar.text_input(
+        "Google Cloud API Key", 
+        type="password",
+        placeholder="Entrez votre clé Google Cloud",
+        help="Obtenez une clé sur https://cloud.google.com/"
+    )
+  
+    st.sidebar.header("🔧 Statut des Services")
+    if deepgram_key:
+        st.sidebar.success("✅ Deepgram: Configuré")
+    else:
+        st.sidebar.warning("⚠️ Deepgram: Non configuré")
+        
+    if google_key:
+        st.sidebar.success("✅ Google Cloud: Configuré")
+    else:
+        st.sidebar.warning("⚠️ Google Cloud: Non configuré")
+    
+    # Interface principale avec onglets
+    tab1, tab2 = st.tabs(["🎤 Enregistrement Vocal", "📁 Fichier Audio"])
+    
+    with tab1:
+        st.header("🎤 Enregistrement Vocal")
+        st.markdown("Enregistrez votre voix directement depuis le navigateur")
+        
+        audio_bytes = st.audio_input("Cliquez pour enregistrer", key="browser_recording")
+        
+        if audio_bytes:
+            st.audio(audio_bytes, format="audio/wav")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                language = st.selectbox(
+                    "Langue:",
+                    ["en-US", "fr-FR", "es-ES", "de-DE", "ar-SA", "hi-IN", "ja-JP", "ko-KR", "zh-CN"],
+                    key="record_lang"
+                )
+            
+            with col2:
+                service = st.radio(
+                    "Service:",
+                    ["Deepgram", "Google Cloud"],
+                    horizontal=True,
+                    key="record_service"
+                )
+            
+            if st.button("🚀 Transcrire l'enregistrement", use_container_width=True):
+                if (service == "Deepgram" and not deepgram_key) or (service == "Google Cloud" and not google_key):
+                    st.error("❌ Clé API manquante pour le service sélectionné")
+                else:
+                    with st.spinner("Transcription en cours..."):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                            tmp_file.write(audio_bytes.getvalue())
+                            tmp_path = tmp_file.name
+                        
+                        if service == "Deepgram":
+                            result = transcribe_with_deepgram(tmp_path, deepgram_key, language)
+                        else:
+                            result = transcribe_with_google_cloud(tmp_path, google_key, language)
+                        
+                        os.unlink(tmp_path)
+                        
+                        if result and not any(error in result for error in ["❌", "not configured", "No speech"]):
+                            st.session_state.transcription += " " + result.strip()
+                            st.success("✅ Transcription ajoutée !")
+                            st.balloons()
+                        else:
+                            st.error(f"{result}")
+    
+    with tab2:
+        st.header("📁 Fichier Audio")
+        st.markdown("Téléchargez un fichier audio existant")
+        
+        uploaded_file = st.file_uploader(
+            "Choisissez un fichier audio",
+            type=['wav', 'mp3', 'm4a', 'ogg'],
+            accept_multiple_files=False
+        )
+        
+        if uploaded_file is not None:
+            st.audio(uploaded_file, format=uploaded_file.type)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                language = st.selectbox(
+                    "Langue:",
+                    ["en-US", "fr-FR", "es-ES", "de-DE", "ar-SA", "hi-IN", "ja-JP", "ko-KR", "zh-CN"],
+                    key="upload_lang"
+                )
+            
+            with col2:
+                service = st.radio(
+                    "Service:",
+                    ["Deepgram", "Google Cloud"],
+                    horizontal=True,
+                    key="upload_service"
+                )
+            
+            if st.button("🚀 Transcrire le fichier", use_container_width=True):
+                if (service == "Deepgram" and not deepgram_key) or (service == "Google Cloud" and not google_key):
+                    st.error("❌ Clé API manquante pour le service sélectionné")
+                else:
+                    with st.spinner("Transcription en cours..."):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                            tmp_file.write(uploaded_file.getvalue())
+                            tmp_path = tmp_file.name
+                        
+                        if service == "Deepgram":
+                            result = transcribe_with_deepgram(tmp_path, deepgram_key, language)
+                        else:
+                            result = transcribe_with_google_cloud(tmp_path, google_key, language)
+                        
+                        os.unlink(tmp_path)
+                        
+                        if result and not any(error in result for error in ["❌", "not configured", "No speech"]):
+                            st.session_state.transcription += " " + result.strip()
+                            st.success("✅ Transcription ajoutée !")
+                            st.balloons()
+                        else:
+                            st.error(f"{result}")
+    
+    st.header("📝 Résultats de Transcription")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("🗑️ Clear", use_container_width=True):
+        if st.button("🗑️ Tout effacer", use_container_width=True):
             st.session_state.transcription = ""
             st.rerun()
     
     with col2:
-        if st.button("💾 Save to File", use_container_width=True):
+        if st.button("💾 Sauvegarder", use_container_width=True):
             if st.session_state.transcription.strip():
-                filename = "transcription.txt"
+                filename = f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
                 with open(filename, "w", encoding="utf-8") as f:
                     f.write(st.session_state.transcription.strip())
-                st.success(f"✅ Saved to {filename}")
+                st.success(f"✅ Sauvegardé sous {filename}")
             else:
-                st.warning("⚠️ No transcription to save")
+                st.warning("⚠️ Aucune transcription à sauvegarder")
     
     with col3:
         if st.session_state.transcription.strip():
             st.download_button(
-                label="📥 Download",
+                label="📥 Télécharger",
                 data=st.session_state.transcription,
-                file_name="transcription.txt",
+                file_name=f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain",
                 use_container_width=True
             )
-
-
     st.text_area(
-        "Current Transcription:", 
-        st.session_state.transcription, 
+        "Transcription actuelle:",
+        st.session_state.transcription,
         height=200,
-        key="transcript_display",
-        placeholder="Your transcription will appear here..."
+        placeholder="Vos transcriptions apparaîtront ici...",
+        key="transcript_display"
     )
-    with st.expander("ℹ️ Instructions & Tips"):
+    
+    with st.expander("ℹ️ Instructions"):
         st.markdown("""
-        **How to use:**
-        - **Google Speech Recognition**: Free, requires internet
-        - **Deepgram**: More accurate, requires API key
-        - **Record First**: Record audio first, then choose transcription method
+        **Comment utiliser:**
+        1. **Enregistrement Vocal**: Utilisez l'enregistreur du navigateur
+        2. **Fichier Audio**: Téléchargez un fichier existant
         
-        **Tips for better results:**
-        - Speak clearly and at a normal pace
-        - Reduce background noise
-        - Ensure microphone access is granted
-        - Use Deepgram for better accuracy (free tier available)
+        **Configuration API:**
+        - **Deepgram**: Clé gratuite sur [deepgram.com](https://deepgram.com)
+        - **Google Cloud**: Clé sur [Google Cloud Console](https://console.cloud.google.com)
         
-        **Get Deepgram API Key:**
-        1. Visit [https://deepgram.com/](https://deepgram.com/)
-        2. Sign up for free
-        3. Go to API section in dashboard
-        4. Create new API key
-        5. Copy key (starts with `dg_`)
-        6. Paste in sidebar above
+        **Formats supportés:** WAV, MP3, M4A, OGG
         """)
 
 if __name__ == "__main__":
-
     main()
