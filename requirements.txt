@@ -77,8 +77,6 @@ protobuf==6.31.1
 psutil==7.0.0
 pure_eval==0.2.3
 puremagic==1.30
-pyarrow==21.0.0
-PyAudio==0.2.14
 pycparser==2.23
 pydantic==2.12.0
 pydantic_core==2.41.1
@@ -133,4 +131,5 @@ websockets==15.0.1
 wordcloud==1.9.4
 xlrd==0.7.1
 xlwt==0.7.2
+
 
